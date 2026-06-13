@@ -114,7 +114,7 @@ func createReq(envelope, body string) *http.Request {
 
 func TestMiddlewareDeniesOverQuota(t *testing.T) {
 	eng := usage.NewEngine(&fakeAPI{configs: map[int]map[string]string{}})
-	e := New(newStore(t), eng, nil, true, discard())
+	e := New(Options{Store: newStore(t), Engine: eng, Enforce: true, Logger: discard()})
 	called := false
 	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -142,7 +142,7 @@ func TestMiddlewareAllowsWithinQuota(t *testing.T) {
 	eng := usage.NewEngine(&fakeAPI{configs: map[int]map[string]string{
 		999: {"cores": "2", "memory": "2048"},
 	}})
-	e := New(newStore(t), eng, nil, true, discard())
+	e := New(Options{Store: newStore(t), Engine: eng, Enforce: true, Logger: discard()})
 	called := false
 	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -162,7 +162,7 @@ func TestMiddlewareAllowsWithinQuota(t *testing.T) {
 
 func TestMiddlewareAdminBypass(t *testing.T) {
 	eng := usage.NewEngine(&fakeAPI{configs: map[int]map[string]string{}})
-	e := New(newStore(t), eng, []string{"u@pve"}, true, discard())
+	e := New(Options{Store: newStore(t), Engine: eng, Admins: []string{"u@pve"}, Enforce: true, Logger: discard()})
 	called := false
 	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -181,7 +181,7 @@ func TestMiddlewareDeniesOverQuotaClone(t *testing.T) {
 	eng := usage.NewEngine(&fakeAPI{configs: map[int]map[string]string{
 		100: {"cores": "8", "memory": "2048"},
 	}})
-	e := New(newStore(t), eng, nil, true, discard())
+	e := New(Options{Store: newStore(t), Engine: eng, Enforce: true, Logger: discard()})
 	called := false
 	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -207,7 +207,7 @@ func TestMiddlewareDeniesOverQuotaRollback(t *testing.T) {
 		configs: map[int]map[string]string{100: {"cores": "2", "memory": "2048"}},
 		snaps:   map[string]map[string]string{"snap1": {"cores": "8", "memory": "2048"}},
 	})
-	e := New(newStore(t), eng, nil, true, discard())
+	e := New(Options{Store: newStore(t), Engine: eng, Enforce: true, Logger: discard()})
 	called := false
 	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -224,9 +224,93 @@ func TestMiddlewareDeniesOverQuotaRollback(t *testing.T) {
 	}
 }
 
+func TestMiddlewareFailClosed(t *testing.T) {
+	// Config change on a guest whose current config can't be read.
+	eng := usage.NewEngine(&fakeAPI{configs: map[int]map[string]string{}})
+	e := New(Options{Store: newStore(t), Engine: eng, Enforce: true,
+		FailClosed: true, Logger: discard()})
+	called := false
+	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	r, _ := http.NewRequest("PUT", "/api2/json/nodes/n1/qemu/404/config",
+		io.NopCloser(strings.NewReader("memory=8192")))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Cookie", "PVEAuthCookie=PVE:u@pve:6A::sig")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if called {
+		t.Error("fail-closed must deny when accounting reads fail")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestMiddlewareFailOpen(t *testing.T) {
+	// Same scenario, default (fail-open): the write is allowed through.
+	eng := usage.NewEngine(&fakeAPI{configs: map[int]map[string]string{}})
+	e := New(Options{Store: newStore(t), Engine: eng, Enforce: true, Logger: discard()})
+	called := false
+	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	r, _ := http.NewRequest("PUT", "/api2/json/nodes/n1/qemu/404/config",
+		io.NopCloser(strings.NewReader("memory=8192")))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Cookie", "PVEAuthCookie=PVE:u@pve:6A::sig")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+	if !called {
+		t.Error("fail-open (default) should allow when accounting reads fail")
+	}
+}
+
+func TestMiddlewareDefaultDeny(t *testing.T) {
+	eng := usage.NewEngine(&fakeAPI{configs: map[int]map[string]string{}})
+	e := New(Options{Store: newStore(t), Engine: eng, Enforce: true,
+		DefaultDeny: true, Logger: discard()})
+	called := false
+	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	// migrate is in neither table -> unknown write
+	r, _ := http.NewRequest("POST", "/api2/json/nodes/n1/qemu/100/migrate",
+		io.NopCloser(strings.NewReader("target=n2")))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Cookie", "PVEAuthCookie=PVE:u@pve:6A::sig")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if called {
+		t.Error("default-deny must block unknown write endpoints")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestMiddlewareUnknownWritePassesWithoutDefaultDeny(t *testing.T) {
+	eng := usage.NewEngine(&fakeAPI{configs: map[int]map[string]string{}})
+	e := New(Options{Store: newStore(t), Engine: eng, Enforce: true, Logger: discard()})
+	called := false
+	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	r, _ := http.NewRequest("POST", "/api2/json/nodes/n1/qemu/100/migrate",
+		io.NopCloser(strings.NewReader("target=n2")))
+	r.Header.Set("Cookie", "PVEAuthCookie=PVE:u@pve:6A::sig")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+	if !called {
+		t.Error("unknown write must pass when default-deny is off")
+	}
+}
+
 func TestMiddlewarePoolMembershipDenied(t *testing.T) {
 	eng := usage.NewEngine(&fakeAPI{configs: map[int]map[string]string{}})
-	e := New(newStore(t), eng, nil, true, discard())
+	e := New(Options{Store: newStore(t), Engine: eng, Enforce: true, Logger: discard()})
 	called := false
 	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true

@@ -16,10 +16,12 @@ package admission
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/audit"
@@ -35,24 +37,66 @@ const gib = int64(1) << 30
 // become observable. A var so tests can shorten it.
 var settleTimeout = 10 * time.Second
 
-// Enforcer applies quota admission to quota-relevant writes.
-type Enforcer struct {
-	store   *quota.Store
-	engine  *usage.Engine
-	admins  map[string]bool
-	enforce bool
-	logger  *slog.Logger
-	locks   locks
+// Options configures the Enforcer.
+type Options struct {
+	Store       *quota.Store
+	Engine      *usage.Engine
+	Admins      []string
+	Enforce     bool // P4: admit/reject quota-relevant writes
+	FailClosed  bool // P6: deny (not allow) when accounting fails
+	DefaultDeny bool // P6: deny write endpoints absent from the tables
+	Logger      *slog.Logger
 }
 
-// New builds an Enforcer. When enforce is false (or store/engine are nil) it
+// Enforcer applies quota admission to quota-relevant writes.
+type Enforcer struct {
+	store       *quota.Store
+	engine      *usage.Engine
+	admins      map[string]bool
+	enforce     bool
+	failClosed  bool
+	defaultDeny bool
+	logger      *slog.Logger
+	locks       locks
+	m           metrics
+}
+
+// New builds an Enforcer. When Enforce is false (or Store/Engine are nil) it
 // only audits — identical to P2 — so it is always safe to install.
-func New(store *quota.Store, engine *usage.Engine, admins []string, enforce bool, logger *slog.Logger) *Enforcer {
-	am := make(map[string]bool, len(admins))
-	for _, a := range admins {
+func New(o Options) *Enforcer {
+	am := make(map[string]bool, len(o.Admins))
+	for _, a := range o.Admins {
 		am[a] = true
 	}
-	return &Enforcer{store: store, engine: engine, admins: am, enforce: enforce, logger: logger}
+	return &Enforcer{
+		store: o.Store, engine: o.Engine, admins: am,
+		enforce: o.Enforce, failClosed: o.FailClosed, defaultDeny: o.DefaultDeny,
+		logger: o.Logger,
+	}
+}
+
+// metrics holds atomic admission counters for the /metrics endpoint.
+type metrics struct {
+	audited  atomic.Int64
+	allowed  atomic.Int64
+	denied   atomic.Int64
+	failOpen atomic.Int64
+	failShut atomic.Int64
+}
+
+// WriteMetrics renders Prometheus-style counters.
+func (e *Enforcer) WriteMetrics(w io.Writer) {
+	fmt.Fprint(w, "# HELP uq_quota_writes_total Quota-relevant writes observed.\n")
+	fmt.Fprint(w, "# TYPE uq_quota_writes_total counter\n")
+	fmt.Fprintf(w, "uq_quota_writes_total %d\n", e.m.audited.Load())
+	fmt.Fprint(w, "# HELP uq_admission_total Admission decisions for enforced writes.\n")
+	fmt.Fprint(w, "# TYPE uq_admission_total counter\n")
+	fmt.Fprintf(w, "uq_admission_total{decision=\"allow\"} %d\n", e.m.allowed.Load())
+	fmt.Fprintf(w, "uq_admission_total{decision=\"deny\"} %d\n", e.m.denied.Load())
+	fmt.Fprint(w, "# HELP uq_accounting_errors_total Accounting failures by mode.\n")
+	fmt.Fprint(w, "# TYPE uq_accounting_errors_total counter\n")
+	fmt.Fprintf(w, "uq_accounting_errors_total{mode=\"fail_open\"} %d\n", e.m.failOpen.Load())
+	fmt.Fprintf(w, "uq_accounting_errors_total{mode=\"fail_closed\"} %d\n", e.m.failShut.Load())
 }
 
 type settleKind int
@@ -79,6 +123,10 @@ type decision struct {
 func (e *Enforcer) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		res := classify.Classify(r.Method, r.URL.Path)
+		if res.Action == classify.ActionUnknownWrite {
+			e.handleUnknown(w, r, next, res)
+			return
+		}
 		if !res.QuotaRelevant {
 			next.ServeHTTP(w, r)
 			return
@@ -86,6 +134,7 @@ func (e *Enforcer) Middleware(next http.Handler) http.Handler {
 		id := identity.FromRequest(r)
 		params := audit.Params(r, res)
 		audit.Emit(e.logger, id, res, params)
+		e.m.audited.Add(1)
 
 		if !e.enforce || e.store == nil || e.engine == nil ||
 			e.admins[id.User] || !enforceable(res.Action) {
@@ -114,6 +163,7 @@ func (e *Enforcer) Middleware(next http.Handler) http.Handler {
 			e.deny(w, res, id, dec.reason)
 			return
 		}
+		e.m.allowed.Add(1)
 		sc := &statusCapture{ResponseWriter: w}
 		next.ServeHTTP(sc, r)
 		if sc.status >= 300 {
@@ -126,6 +176,22 @@ func (e *Enforcer) Middleware(next http.Handler) http.Handler {
 			e.waitConfigChanged(dec.node, dec.kind, dec.vmid, dec.preCfg)
 		}
 	})
+}
+
+// handleUnknown applies the P6 default-deny policy to write endpoints in
+// neither the intercept nor the pass-through table. Off by default; always
+// logged so the allowlist can be completed before enabling.
+func (e *Enforcer) handleUnknown(w http.ResponseWriter, r *http.Request, next http.Handler, res classify.Result) {
+	id := identity.FromRequest(r)
+	e.m.audited.Add(1)
+	if e.enforce && e.defaultDeny && !e.admins[id.User] {
+		e.deny(w, res, id, "write endpoint not in the quota allowlist (default-deny)")
+		return
+	}
+	e.logger.Warn("unknown write endpoint forwarded",
+		"method", res.Method, "path", res.Path, "user", id.User,
+		"note", "enable -default-deny to block")
+	next.ServeHTTP(w, r)
 }
 
 func enforceable(a classify.Action) bool {
@@ -151,7 +217,7 @@ func (e *Enforcer) decide(res classify.Result, q *quota.UserQuota, params map[st
 			}
 			u, err := e.engine.RestoreUsage(res.Node, archive, res.GuestKind)
 			if err != nil {
-				return e.failOpen("restore config unreadable", err)
+				return e.onErr("restore config unreadable", err)
 			}
 			d := usageToDelta(u)
 			return e.finalizeCreate(e.check(q, res.Node, d), d, atoi(params["vmid"]), q.Pool)
@@ -162,7 +228,7 @@ func (e *Enforcer) decide(res classify.Result, q *quota.UserQuota, params map[st
 	case classify.ActionClone:
 		src, err := e.engine.GuestUsage(res.Node, res.GuestKind, vmid)
 		if err != nil {
-			return e.failOpen("clone source unreadable", err)
+			return e.onErr("clone source unreadable", err)
 		}
 		d := CloneDelta(src, params)
 		return e.finalizeCreate(e.check(q, res.Node, d), d, atoi(params["newid"]), q.Pool)
@@ -170,7 +236,7 @@ func (e *Enforcer) decide(res classify.Result, q *quota.UserQuota, params map[st
 	case classify.ActionGuestConfig, classify.ActionResize, classify.ActionMoveDisk:
 		cur, err := e.engine.GuestConfig(res.Node, res.GuestKind, vmid)
 		if err != nil {
-			return e.failOpen("current config unreadable", err)
+			return e.onErr("current config unreadable", err)
 		}
 		var d Delta
 		switch res.Action {
@@ -186,11 +252,11 @@ func (e *Enforcer) decide(res classify.Result, q *quota.UserQuota, params map[st
 	case classify.ActionRollback:
 		cur, err := e.engine.GuestConfig(res.Node, res.GuestKind, vmid)
 		if err != nil {
-			return e.failOpen("current config unreadable", err)
+			return e.onErr("current config unreadable", err)
 		}
 		snapU, err := e.engine.SnapshotUsage(res.Node, res.GuestKind, vmid, res.Snapshot)
 		if err != nil {
-			return e.failOpen("snapshot config unreadable", err)
+			return e.onErr("snapshot config unreadable", err)
 		}
 		d := IncreaseDelta(snapU, usage.ConfigUsage(res.GuestKind, cur))
 		return e.finalizeGuestMod(e.check(q, res.Node, d), d, res.Node, res.GuestKind, vmid, cur)
@@ -205,7 +271,15 @@ func (e *Enforcer) decide(res classify.Result, q *quota.UserQuota, params map[st
 	return decision{allowed: true}
 }
 
-func (e *Enforcer) failOpen(msg string, err error) decision {
+// onErr is the accounting-failure policy: fail-open (allow, P4 default) or
+// fail-closed (deny, P6 -fail-closed).
+func (e *Enforcer) onErr(msg string, err error) decision {
+	if e.failClosed {
+		e.m.failShut.Add(1)
+		e.logger.Error("admission deny: "+msg+" (fail-closed)", "err", err)
+		return decision{allowed: false, reason: msg}
+	}
+	e.m.failOpen.Add(1)
 	e.logger.Warn("admission allow: "+msg+" (fail-open)", "err", err)
 	return decision{allowed: true}
 }
@@ -238,9 +312,7 @@ func (e *Enforcer) check(q *quota.UserQuota, node string, d Delta) decision {
 	}
 	u, err := e.engine.UserUsage(q.Pool)
 	if err != nil {
-		e.logger.Warn("admission allow: usage computation failed (P4 fail-open)",
-			"pool", q.Pool, "err", err)
-		return decision{allowed: true}
+		return e.onErr("usage computation failed", err)
 	}
 	reason, ok := checkQuota(u, d, q, node)
 	return decision{allowed: ok, reason: reason}
@@ -342,6 +414,7 @@ func sameConfig(a, b map[string]string) bool {
 
 // deny writes a PVE-compatible error so the native GUI shows the reason.
 func (e *Enforcer) deny(w http.ResponseWriter, res classify.Result, id identity.Identity, reason string) {
+	e.m.denied.Add(1)
 	e.logger.Warn("quota denied", "user", id.User, "action", string(res.Action),
 		"path", res.Path, "reason", reason)
 	msg := "uq-proxy quota: " + reason

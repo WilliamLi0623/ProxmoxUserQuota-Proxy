@@ -36,6 +36,10 @@ func TestClassify(t *testing.T) {
 		{"DELETE", "/api2/json/nodes/n1/qemu/100", ActionPassthrough, false, "json", "qemu", "100", ""},
 		{"POST", "/api2/json/access/ticket", ActionPassthrough, false, "json", "", "", ""},
 		{"GET", "/api2/json/nodes/n1/vncwebsocket", ActionRead, false, "json", "", "", ""},
+		// unknown writes (default-deny territory)
+		{"POST", "/api2/json/nodes/n1/qemu/100/migrate", ActionUnknownWrite, false, "json", "qemu", "100", ""},
+		{"POST", "/api2/json/cluster/ha/resources", ActionUnknownWrite, false, "json", "", "", ""},
+		{"PUT", "/api2/json/access/users/x@pve", ActionUnknownWrite, false, "json", "", "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {

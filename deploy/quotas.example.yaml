@@ -4,6 +4,9 @@
 version: 0
 defaults: {}            # intentionally empty: default deny
 
+admins:                 # users exempt from enforcement (e.g. operators)
+  - root@pam
+
 users:
   alice@pve:
     pool: uq-alice      # must match the user's provisioned pool (uq-<username>)

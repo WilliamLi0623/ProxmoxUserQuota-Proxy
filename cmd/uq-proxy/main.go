@@ -8,7 +8,9 @@
 // limits. P4 enforces: with -enforce, over-quota create/config/resize are
 // rejected (and pool-membership edits denied) under a per-user lock. P5 closes
 // the side doors (clone, restore, move-disk, snapshot rollback, raw storage
-// allocation) with the same admission path.
+// allocation) with the same admission path. P6 hardens: -fail-closed denies
+// quota writes when accounting reads fail, -default-deny rejects unknown write
+// endpoints, and /metrics exposes admission counters.
 package main
 
 import (
@@ -35,7 +37,7 @@ import (
 	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/usage"
 )
 
-const version = "0.5.0-p5"
+const version = "0.6.0-p6"
 
 func main() {
 	var (
@@ -49,6 +51,8 @@ func main() {
 		quotasPath  = flag.String("quotas", "", "path to quotas.yaml; enables the accounting endpoints")
 		pveTokenF   = flag.String("pve-token-file", "", "file with the service-account API token 'uq-proxy@pve!id=secret' for accounting reads")
 		enforce     = flag.Bool("enforce", false, "P4: reject over-quota create/config/resize (requires -quotas and -pve-token-file)")
+		failClosed  = flag.Bool("fail-closed", false, "P6: deny quota-relevant writes when accounting reads fail (requires -enforce)")
+		defaultDeny = flag.Bool("default-deny", false, "P6: deny write endpoints not in the known intercept/pass-through tables (requires -enforce)")
 	)
 	flag.Parse()
 
@@ -110,12 +114,25 @@ func main() {
 		fmt.Fprintln(os.Stderr, "-enforce requires both -quotas and -pve-token-file")
 		os.Exit(2)
 	}
+	if (*failClosed || *defaultDeny) && !*enforce {
+		fmt.Fprintln(os.Stderr, "-fail-closed and -default-deny require -enforce")
+		os.Exit(2)
+	}
 	var admins []string
 	if quotaStore != nil {
 		admins = quotaStore.Admins()
 	}
-	enforcer := admission.New(quotaStore, engine, admins, *enforce, logger)
-	logger.Info("admission middleware", "enforce", *enforce, "admins", len(admins))
+	enforcer := admission.New(admission.Options{
+		Store:       quotaStore,
+		Engine:      engine,
+		Admins:      admins,
+		Enforce:     *enforce,
+		FailClosed:  *failClosed,
+		DefaultDeny: *defaultDeny,
+		Logger:      logger,
+	})
+	logger.Info("admission middleware", "enforce", *enforce,
+		"fail_closed", *failClosed, "default_deny", *defaultDeny, "admins", len(admins))
 
 	handler, err := proxy.New(proxy.Options{
 		Upstream:         target,
@@ -154,6 +171,10 @@ func main() {
 				fmt.Fprintf(w, "ok uq-proxy %s\n", version)
 			})
 			mux.HandleFunc("/usage", usageHandler(quotaStore, engine))
+			mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+				enforcer.WriteMetrics(w)
+			})
 			logger.Info("admin listener", "addr", *adminListen)
 			if err := http.ListenAndServe(*adminListen, mux); err != nil {
 				logger.Error("admin listener failed", "err", err)
@@ -187,12 +208,13 @@ func main() {
 // and store for admission decisions.
 func usageHandler(store *quota.Store, engine *usage.Engine) http.HandlerFunc {
 	type entry struct {
-		User    string           `json:"user"`
-		Pool    string           `json:"pool,omitempty"`
-		Usage   usage.Usage      `json:"usage"`
-		DiskGiB map[string]int64 `json:"disk_gib,omitempty"`
-		Quota   *quota.UserQuota `json:"quota,omitempty"`
-		Error   string           `json:"error,omitempty"`
+		User      string           `json:"user"`
+		Pool      string           `json:"pool,omitempty"`
+		Usage     usage.Usage      `json:"usage"`
+		DiskGiB   map[string]int64 `json:"disk_gib,omitempty"`
+		Quota     *quota.UserQuota `json:"quota,omitempty"`
+		OverQuota bool             `json:"over_quota"`
+		Error     string           `json:"error,omitempty"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil || engine == nil {
@@ -220,10 +242,28 @@ func usageHandler(store *quota.Store, engine *usage.Engine) http.HandlerFunc {
 			} else {
 				e.Usage = u
 				e.DiskGiB = u.DiskGiB()
+				e.OverQuota = overQuota(u, q)
 			}
 			out = append(out, e)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	}
+}
+
+// overQuota reports whether live usage exceeds any base quota dimension. Node
+// overrides are ignored — this is a coarse reconciliation alarm (a cron polls
+// /usage and flags over_quota users), not the precise admission check.
+func overQuota(u usage.Usage, q *quota.UserQuota) bool {
+	if u.Cores > q.Cores || u.MemoryMiB > q.MemoryMiB || u.Instances > q.Instances {
+		return true
+	}
+	for st, b := range u.DiskBytes {
+		lim, ok := q.DiskGiB[st]
+		gib := (b + (1 << 30) - 1) / (1 << 30)
+		if !ok || gib > lim {
+			return true
+		}
+	}
+	return false
 }
