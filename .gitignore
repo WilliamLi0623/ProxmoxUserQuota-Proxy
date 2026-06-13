@@ -1,5 +1,6 @@
 /bin/
 /dist/
+/uq-proxy
 *.exe
 *.test
 *.out

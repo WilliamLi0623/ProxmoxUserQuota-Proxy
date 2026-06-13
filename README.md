@@ -4,7 +4,25 @@
 
 Proxmox VE 的透明配额代理（Go）。位于用户与 `pveproxy:8006` 之间：除「资源变更」写请求外，一切逐字转发（含 noVNC/SPICE websocket 与 ISO 上传）；对约 15 个写端点做按用户配额审批，fail-closed。
 
-**状态：尚未开工 —— P1 从这里开始**（见 [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md)）。
+**状态：P1 进行中** —— 透明直通骨架已就绪（websocket 与流式直通），待在测试集群前完成 P1 验证（见 [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md)）。
+
+## 构建与运行
+
+    go build -o uq-proxy ./cmd/uq-proxy
+    ./uq-proxy -upstream https://<入口节点>:8006 \
+      -tls-cert tls.crt -tls-key tls.key \
+      -upstream-ca pve-ca.pem    # 测试集群也可改用 -upstream-insecure
+
+| 参数 | 说明 |
+|---|---|
+| `-listen` | 面向用户的 TLS 监听地址（默认 `:8006`） |
+| `-upstream` | 上游 pveproxy 地址（必填） |
+| `-tls-cert` / `-tls-key` | 对用户出示的证书与私钥（必填） |
+| `-upstream-ca` | 校验上游证书的 CA（PEM）；留空用系统信任库 |
+| `-upstream-insecure` | 跳过上游证书校验（仅测试集群） |
+| `-admin-listen` | 管理/健康监听，`/healthz`（默认 `127.0.0.1:9090`，置空禁用） |
+
+要求 Go ≥ 1.22，仅标准库。透明性的关键实现：`FlushInterval=-1`（控制台帧、任务日志、上传进度即时转发）、对用户强制 HTTP/1.1（保证 websocket 劫持直通）、访问日志包装器保持可劫持（`Unwrap`/`Hijack`）。systemd 单元见 [`deploy/uq-proxy.service`](deploy/uq-proxy.service)。
 
 ## 规划形态（P1+）
 

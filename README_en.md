@@ -4,7 +4,25 @@
 
 The transparent quota-enforcing reverse proxy for Proxmox VE (Go). Sits between users and `pveproxy:8006`: forwards everything verbatim (incl. noVNC/SPICE websockets and ISO uploads) except the ~15 resource-mutating write endpoints, which undergo per-user quota admission. Fail-closed.
 
-**Status: Not Started — P1 Begins Here** (see [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md)).
+**Status: P1 in progress** — the transparent pass-through skeleton is ready (websockets & streaming); P1 verification against a test cluster is pending (see [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md)).
+
+## Build & Run
+
+    go build -o uq-proxy ./cmd/uq-proxy
+    ./uq-proxy -upstream https://<entry-node>:8006 \
+      -tls-cert tls.crt -tls-key tls.key \
+      -upstream-ca pve-ca.pem    # or -upstream-insecure on test clusters
+
+| Flag | Meaning |
+|---|---|
+| `-listen` | user-facing TLS listen address (default `:8006`) |
+| `-upstream` | upstream pveproxy base URL (required) |
+| `-tls-cert` / `-tls-key` | certificate/key served to users (required) |
+| `-upstream-ca` | CA bundle (PEM) to verify the upstream; empty = system roots |
+| `-upstream-insecure` | skip upstream TLS verification (test clusters only) |
+| `-admin-listen` | admin/health listener, `/healthz` (default `127.0.0.1:9090`; empty disables) |
+
+Requires Go ≥ 1.22; standard library only. Transparency-critical details: `FlushInterval=-1` (console frames, task-log tails and upload progress are forwarded immediately), HTTP/1.1 forced towards clients (keeps websocket hijacking on the well-tested path), and a hijack-preserving access-log wrapper (`Unwrap`/`Hijack`). A systemd unit ships in [`deploy/uq-proxy.service`](deploy/uq-proxy.service).
 
 ## Planned Shape (P1+)
 

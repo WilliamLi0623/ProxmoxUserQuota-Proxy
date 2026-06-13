@@ -1,0 +1,24 @@
+[Unit]
+Description=ProxmoxUserQuota transparent quota proxy (uq-proxy)
+Documentation=https://github.com/WilliamLi0623/ProxmoxUserQuota-Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Adjust paths/flags for your environment (see README).
+ExecStart=/usr/local/bin/uq-proxy \
+  -listen :8006 \
+  -upstream https://CLOUD-ENTRY-NODE:8006 \
+  -tls-cert /etc/uq-proxy/tls.crt \
+  -tls-key /etc/uq-proxy/tls.key \
+  -upstream-ca /etc/uq-proxy/pve-ca.pem
+DynamicUser=yes
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/uq-proxy
+
+[Install]
+WantedBy=multi-user.target
