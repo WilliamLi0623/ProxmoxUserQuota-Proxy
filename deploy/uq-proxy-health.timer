@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the uq-proxy liveness watchdog periodically
+Documentation=https://github.com/WilliamLi0623/ProxmoxUserQuota-Proxy
+
+[Timer]
+# First check shortly after boot, then every 30s. The proxy is the singular
+# serialization point, so bias toward fast detection.
+OnBootSec=60
+OnUnitActiveSec=30
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=uq-proxy liveness watchdog (restart if active-but-wedged)
+Documentation=https://github.com/WilliamLi0623/ProxmoxUserQuota-Proxy
+After=uq-proxy.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/uq-proxy-healthcheck.sh

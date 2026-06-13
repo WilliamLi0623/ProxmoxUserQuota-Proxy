@@ -3,15 +3,32 @@ Description=ProxmoxUserQuota transparent quota proxy (uq-proxy)
 Documentation=https://github.com/WilliamLi0623/ProxmoxUserQuota-Proxy
 After=network-online.target
 Wants=network-online.target
+# The proxy is the singular serialization point (see docs/HA): it must always
+# come back. StartLimitIntervalSec=0 disables the start-rate limiter so systemd
+# never gives up restarting it. A liveness watchdog (uq-proxy-health.timer)
+# restarts it if it wedges while still running.
+StartLimitIntervalSec=0
 
 [Service]
 # Adjust paths/flags for your environment (see README).
+#   -enforce       admit/reject quota-relevant writes (omit for audit-only)
+#   -fail-closed   deny quota-relevant writes when accounting is unreachable
+#   -default-deny  deny write endpoints absent from the intercept/pass-through
+#                  tables (PVE upgrades add endpoints; a blacklist would leak)
+# Enable -default-deny only after a soak confirms no legitimate GUI flow hits
+# an unclassified write (watch for "unknown write endpoint forwarded" logs).
 ExecStart=/usr/local/bin/uq-proxy \
-  -listen :8006 \
-  -upstream https://CLOUD-ENTRY-NODE:8006 \
+  -listen :8007 \
+  -upstream https://127.0.0.1:8006 \
   -tls-cert /etc/uq-proxy/tls.crt \
   -tls-key /etc/uq-proxy/tls.key \
-  -upstream-ca /etc/uq-proxy/pve-ca.pem
+  -upstream-ca /etc/uq-proxy/pve-ca.pem \
+  -admin-listen 127.0.0.1:9090 \
+  -quotas /etc/uq-proxy/quotas.yaml \
+  -pve-token-file /etc/uq-proxy/pve-token \
+  -enforce \
+  -fail-closed \
+  -default-deny
 DynamicUser=yes
 # Under DynamicUser the service runs as a transient user, so the TLS key
 # must be reachable by group. Provision tls.key group-readable by www-data
