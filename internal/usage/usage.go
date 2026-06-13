@@ -60,7 +60,7 @@ func GuestResources(kind string, cfg map[string]string) Resources {
 	}
 
 	for k, v := range cfg {
-		if !isDiskKey(k) {
+		if !IsDiskKey(k) {
 			continue
 		}
 		st, size, hasSize, cdrom, volid := ParseDisk(v)
@@ -97,7 +97,7 @@ func ParseDisk(v string) (storage string, size int64, hasSize, cdrom bool, volid
 			cdrom = true
 		}
 		if s, found := strings.CutPrefix(f, "size="); found {
-			if n, ok := parseSize(s); ok {
+			if n, ok := ParseSize(s); ok {
 				size = n
 				hasSize = true
 			}
@@ -108,7 +108,9 @@ func ParseDisk(v string) (storage string, size int64, hasSize, cdrom bool, volid
 
 var diskPrefixes = []string{"scsi", "virtio", "sata", "ide", "mp", "unused"}
 
-func isDiskKey(k string) bool {
+// IsDiskKey reports whether a config key names a disk (scsiN, virtioN, sataN,
+// ideN, mpN, unusedN, rootfs, efidisk0, tpmstate0).
+func IsDiskKey(k string) bool {
 	if k == "rootfs" || k == "efidisk0" || k == "tpmstate0" {
 		return true
 	}
@@ -120,9 +122,9 @@ func isDiskKey(k string) bool {
 	return false
 }
 
-// parseSize parses a PVE size such as "32G", "528K", "4M", "1T" or a plain
+// ParseSize parses a PVE size such as "32G", "528K", "4M", "1T" or a plain
 // byte count into bytes. Suffixes are binary (1024-based).
-func parseSize(s string) (int64, bool) {
+func ParseSize(s string) (int64, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, false

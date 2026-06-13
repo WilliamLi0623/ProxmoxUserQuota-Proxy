@@ -21,6 +21,28 @@ type Engine struct {
 
 func NewEngine(api APIClient) *Engine { return &Engine{api: api} }
 
+// GuestConfig fetches one guest's current config. Admission uses it for delta
+// math against pending config/resize changes.
+func (e *Engine) GuestConfig(node, kind string, vmid int) (map[string]string, error) {
+	return e.api.GuestConfig(node, kind, vmid)
+}
+
+// PoolMemberSet returns the set of qemu/lxc VMIDs in a pool. Admission uses it
+// to retire reservations once a freshly created guest is counted in live usage.
+func (e *Engine) PoolMemberSet(poolid string) (map[int]bool, error) {
+	members, err := e.api.PoolMembers(poolid)
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[int]bool, len(members))
+	for _, m := range members {
+		if m.Type == "qemu" || m.Type == "lxc" {
+			set[m.VMID] = true
+		}
+	}
+	return set, nil
+}
+
 // UserUsage sums the configured resources of every qemu/lxc guest in poolid.
 // Storage content listings are cached for the duration of the call so each
 // (node, storage) is fetched at most once.

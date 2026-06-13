@@ -27,6 +27,8 @@ const (
 
 // Result is the classification outcome. Empty string fields are not applicable.
 type Result struct {
+	Method        string // original HTTP method
+	Path          string // original raw request path (with /api2/... prefix)
 	Envelope      string // "json" | "extjs" | "other"
 	Action        Action
 	GuestKind     string // "qemu" | "lxc" | ""
@@ -41,7 +43,7 @@ type Result struct {
 // is the raw URL path including the /api2/{json,extjs} prefix.
 func Classify(method, rawPath string) Result {
 	env, rest := splitEnvelope(rawPath)
-	res := Result{Envelope: env}
+	res := Result{Method: method, Path: rawPath, Envelope: env}
 	method = strings.ToUpper(method)
 
 	if method == "GET" || method == "HEAD" || method == "OPTIONS" {

@@ -71,13 +71,13 @@ func TestIsResourceKey(t *testing.T) {
 }
 
 func TestIsRestore(t *testing.T) {
-	if !isRestore(map[string]string{"archive": "dump/x.vma.zst"}) {
+	if !IsRestore(map[string]string{"archive": "dump/x.vma.zst"}) {
 		t.Error("archive should mark restore")
 	}
-	if !isRestore(map[string]string{"restore": "1"}) {
+	if !IsRestore(map[string]string{"restore": "1"}) {
 		t.Error("restore=1 should mark restore")
 	}
-	if isRestore(map[string]string{"cores": "4"}) {
+	if IsRestore(map[string]string{"cores": "4"}) {
 		t.Error("plain create must not be restore")
 	}
 }

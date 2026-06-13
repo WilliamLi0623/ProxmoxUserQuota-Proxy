@@ -36,15 +36,27 @@ func Middleware(next http.Handler, logger *slog.Logger) http.Handler {
 
 func record(r *http.Request, res classify.Result, logger *slog.Logger) {
 	id := identity.FromRequest(r)
+	params := Params(r, res)
+	Emit(logger, id, res, params)
+}
 
-	var params map[string]string
-	if shouldParseBody(r, res) {
-		if buf, ok := readAndRestore(r); ok {
-			params = parseParams(r.Header.Get("Content-Type"), buf)
-		}
+// Params reads and parses a quota-relevant write's body parameters, restoring
+// the body so it still forwards intact. Returns nil for bodies that must not
+// be buffered (uploads/multipart). Shared with the admission layer (P4).
+func Params(r *http.Request, res classify.Result) map[string]string {
+	if !shouldParseBody(r, res) {
+		return nil
 	}
+	buf, ok := readAndRestore(r)
+	if !ok {
+		return nil
+	}
+	return parseParams(r.Header.Get("Content-Type"), buf)
+}
 
-	restore := res.Action == classify.ActionGuestCreate && isRestore(params)
+// Emit writes one structured audit record for a quota-relevant write.
+func Emit(logger *slog.Logger, id identity.Identity, res classify.Result, params map[string]string) {
+	restore := res.Action == classify.ActionGuestCreate && IsRestore(params)
 	resources := resourceParams(params)
 
 	attrs := []any{
@@ -52,8 +64,8 @@ func record(r *http.Request, res classify.Result, logger *slog.Logger) {
 		"user", id.User,
 		"auth", string(id.Kind),
 		"action", string(res.Action),
-		"method", r.Method,
-		"path", r.URL.Path,
+		"method", res.Method,
+		"path", res.Path,
 		"envelope", res.Envelope,
 	}
 	if res.Phase != "" {
@@ -176,7 +188,9 @@ func scalar(v any) string {
 	}
 }
 
-func isRestore(params map[string]string) bool {
+// IsRestore reports whether a guest-create request is actually a restore
+// (config hidden inside a backup archive); restore enforcement is P5.
+func IsRestore(params map[string]string) bool {
 	if _, ok := params["archive"]; ok {
 		return true
 	}

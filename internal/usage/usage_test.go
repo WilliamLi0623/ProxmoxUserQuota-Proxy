@@ -36,9 +36,9 @@ func TestParseSize(t *testing.T) {
 		"4M": 4 << 20, "1T": 1 << 40, "1024": 1024,
 	}
 	for in, want := range cases {
-		got, ok := parseSize(in)
+		got, ok := ParseSize(in)
 		if !ok || got != want {
-			t.Errorf("parseSize(%s)=%d,%v want %d", in, got, ok, want)
+			t.Errorf("ParseSize(%s)=%d,%v want %d", in, got, ok, want)
 		}
 	}
 }

@@ -4,7 +4,7 @@
 
 The transparent quota-enforcing reverse proxy for Proxmox VE (Go). Sits between users and `pveproxy:8006`: forwards everything verbatim (incl. noVNC/SPICE websockets and ISO uploads) except the ~15 resource-mutating write endpoints, which undergo per-user quota admission. Fail-closed.
 
-**Status: P3 accounting in progress** (P1 transparent pass-through and P2 audit mode are both validated on a PVE 9.2.3 test cluster). P3 adds a read-only service-account client that computes live per-user usage from pool configs (`cores` / `memory` / `disk.<storage>` incl. `unused[n]` / `instances`), a `quotas.yaml` store (default-deny, validated, hot-reloaded), exposed via the `/usage` admin endpoint. It does **not** block yet — enforcement is P4 (see [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md)).
+**Status: P4 core-write quota admission validated on a test cluster** (P1–P3 all validated on PVE 9.2.3). With `-enforce`, over-quota create/config/resize are rejected per the user's quota (PVE-compatible error envelope, readable in the GUI) and pool-membership edits are denied for users; a per-user serialization lock is held until the change is observable in live accounting (a create until its VMID joins the pool, a config/resize until the guest's config changes), defeating PVE's async-task propagation lag so even concurrent floods never overshoot. Without `-enforce` it stays in audit mode (accounting + logging only). See [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md).
 
 ## Build & Run
 
@@ -23,6 +23,7 @@ The transparent quota-enforcing reverse proxy for Proxmox VE (Go). Sits between 
 | `-admin-listen` | admin/health listener, `/healthz` + `/usage` (default `127.0.0.1:9090`; empty disables) |
 | `-quotas` | path to `quotas.yaml`; enables the accounting endpoints (hot-reloaded) |
 | `-pve-token-file` | file holding the service-account API token (`uq-proxy@pve!id=secret`), used only for read-only accounting queries |
+| `-enforce` | P4: reject over-quota create/config/resize (requires both `-quotas` and `-pve-token-file`); audit-only when unset |
 
 Requires Go ≥ 1.22; standard library only, except `gopkg.in/yaml.v3` for parsing the quota config. Transparency-critical details: `FlushInterval=-1` (console frames, task-log tails and upload progress are forwarded immediately), HTTP/1.1 forced towards clients (keeps websocket hijacking on the well-tested path), and a hijack-preserving access-log wrapper (`Unwrap`/`Hijack`). A systemd unit ships in [`deploy/uq-proxy.service`](deploy/uq-proxy.service).
 

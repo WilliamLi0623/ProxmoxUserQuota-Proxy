@@ -40,6 +40,7 @@ type UserQuota struct {
 type Config struct {
 	Version  int                   `yaml:"version"`
 	Defaults map[string]any        `yaml:"defaults"`
+	Admins   []string              `yaml:"admins"` // user ids exempt from enforcement
 	Users    map[string]*UserQuota `yaml:"users"`
 }
 
@@ -146,6 +147,13 @@ func (s *Store) Users() []string {
 		out = append(out, u)
 	}
 	return out
+}
+
+// Admins returns the enforcement-exempt user ids.
+func (s *Store) Admins() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.cfg.Admins...)
 }
 
 // Watch polls the file mtime and hot-reloads on change. A reload that fails

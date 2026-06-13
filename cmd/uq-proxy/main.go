@@ -1,11 +1,12 @@
-// Command uq-proxy is the ProxmoxUserQuota transparent proxy (phases P1–P3).
+// Command uq-proxy is the ProxmoxUserQuota transparent proxy (phases P1–P4).
 //
 // It sits between users and pveproxy:8006 and forwards everything verbatim,
 // including websocket consoles (noVNC/xterm.js/SPICE) and ISO uploads. P2 adds
-// audit mode (every quota-relevant write is attributed and logged, never
-// blocked). P3 adds accounting: a read-only service-account client computes
-// live per-user usage from pool configs, and a hot-reloaded quota store
-// (quotas.yaml) holds the limits. Enforcement using these arrives in P4.
+// audit mode (every quota-relevant write is attributed and logged). P3 adds
+// accounting: a read-only service-account client computes live per-user usage
+// from pool configs, and a hot-reloaded quota store (quotas.yaml) holds the
+// limits. P4 enforces: with -enforce, over-quota create/config/resize are
+// rejected (and pool-membership edits denied) under a per-user lock.
 package main
 
 import (
@@ -25,14 +26,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/audit"
+	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/admission"
 	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/proxy"
 	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/pve"
 	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/quota"
 	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/usage"
 )
 
-const version = "0.3.0-p3"
+const version = "0.4.0-p4"
 
 func main() {
 	var (
@@ -45,6 +46,7 @@ func main() {
 		adminListen = flag.String("admin-listen", "127.0.0.1:9090", "plain-HTTP admin/health listener; empty to disable")
 		quotasPath  = flag.String("quotas", "", "path to quotas.yaml; enables the accounting endpoints")
 		pveTokenF   = flag.String("pve-token-file", "", "file with the service-account API token 'uq-proxy@pve!id=secret' for accounting reads")
+		enforce     = flag.Bool("enforce", false, "P4: reject over-quota create/config/resize (requires -quotas and -pve-token-file)")
 	)
 	flag.Parse()
 
@@ -102,6 +104,17 @@ func main() {
 		logger.Info("accounting client ready", "upstream", target.String())
 	}
 
+	if *enforce && (quotaStore == nil || engine == nil) {
+		fmt.Fprintln(os.Stderr, "-enforce requires both -quotas and -pve-token-file")
+		os.Exit(2)
+	}
+	var admins []string
+	if quotaStore != nil {
+		admins = quotaStore.Admins()
+	}
+	enforcer := admission.New(quotaStore, engine, admins, *enforce, logger)
+	logger.Info("admission middleware", "enforce", *enforce, "admins", len(admins))
+
 	handler, err := proxy.New(proxy.Options{
 		Upstream:         target,
 		UpstreamCAPEM:    caPEM,
@@ -115,9 +128,9 @@ func main() {
 
 	srv := &http.Server{
 		Addr: *listenAddr,
-		// Order: access log (outermost, times everything) -> audit (attributes
-		// quota-relevant writes) -> reverse proxy. Audit is observe-only.
-		Handler: proxy.WithAccessLog(audit.Middleware(handler, logger), logger),
+		// Order: access log (outermost) -> admission (audits every quota write,
+		// and when -enforce is set rejects over-quota core writes) -> proxy.
+		Handler: proxy.WithAccessLog(enforcer.Middleware(handler), logger),
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			// Force HTTP/1.1 towards clients: pveproxy is HTTP/1.1-only anyway,
