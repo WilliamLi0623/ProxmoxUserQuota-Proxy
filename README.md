@@ -4,7 +4,7 @@
 
 Proxmox VE 的透明配额代理（Go）。位于用户与 `pveproxy:8006` 之间：除「资源变更」写请求外，一切逐字转发（含 noVNC/SPICE websocket 与 ISO 上传）；对约 15 个写端点做按用户配额审批，fail-closed。
 
-**状态：P1 进行中** —— 透明直通骨架已就绪（websocket 与流式直通），待在测试集群前完成 P1 验证（见 [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md)）。
+**状态：P1 透明直通已在测试集群验证通过** —— 在 PVE 9.2.3 上实测：直连/代理逐字一致（`/api2/json` + `/api2/extjs`）、Cookie 登录与鉴权回环、控制台 websocket 升级（`101`）、ISO 上传流式直通（字节一致）。剩余 P1 退出门槛为整日真实使用与旁路封锁（见 [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md)）。
 
 ## 构建与运行
 

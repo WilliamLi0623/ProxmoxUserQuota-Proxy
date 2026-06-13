@@ -13,6 +13,11 @@ ExecStart=/usr/local/bin/uq-proxy \
   -tls-key /etc/uq-proxy/tls.key \
   -upstream-ca /etc/uq-proxy/pve-ca.pem
 DynamicUser=yes
+# Under DynamicUser the service runs as a transient user, so the TLS key
+# must be reachable by group. Provision tls.key group-readable by www-data
+# (e.g. acme.sh deploy, or reusing PVE's pve-ssl.key: chgrp www-data + chmod
+# 640) and join that group here. Without this the proxy cannot read its key.
+SupplementaryGroups=www-data
 Restart=always
 RestartSec=2
 NoNewPrivileges=yes

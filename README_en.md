@@ -4,7 +4,7 @@
 
 The transparent quota-enforcing reverse proxy for Proxmox VE (Go). Sits between users and `pveproxy:8006`: forwards everything verbatim (incl. noVNC/SPICE websockets and ISO uploads) except the ~15 resource-mutating write endpoints, which undergo per-user quota admission. Fail-closed.
 
-**Status: P1 in progress** — the transparent pass-through skeleton is ready (websockets & streaming); P1 verification against a test cluster is pending (see [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md)).
+**Status: P1 transparent pass-through validated on a test cluster** — confirmed live on PVE 9.2.3: verbatim direct-vs-proxy parity (`/api2/json` + `/api2/extjs`), cookie login + auth round-trip, console websocket upgrade (`101`), and byte-exact streaming ISO uploads. Remaining P1 exit-gate items are a full day of real usage and bypass lockdown (see [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md)).
 
 ## Build & Run
 
