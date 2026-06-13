@@ -43,7 +43,12 @@ func New(base *url.URL, token string, tlsCfg *tls.Config) *Client {
 
 func (c *Client) get(path string, out any) error {
 	u := *c.base
-	u.Path = strings.TrimRight(u.Path, "/") + path
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		u.Path = strings.TrimRight(u.Path, "/") + path[:i]
+		u.RawQuery = path[i+1:]
+	} else {
+		u.Path = strings.TrimRight(u.Path, "/") + path
+	}
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
 		return err
@@ -102,6 +107,55 @@ func (c *Client) GuestConfig(node, kind string, vmid int) (map[string]string, er
 		out[k] = stringify(v)
 	}
 	return out, nil
+}
+
+// SnapshotConfig returns a snapshot's stored guest config (the rollback
+// target, which may be larger than the current config).
+func (c *Client) SnapshotConfig(node, kind string, vmid int, snap string) (map[string]string, error) {
+	var raw map[string]any
+	p := fmt.Sprintf("/api2/json/nodes/%s/%s/%d/snapshot/%s/config",
+		url.PathEscape(node), kind, vmid, url.PathEscape(snap))
+	if err := c.get(p, &raw); err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		out[k] = stringify(v)
+	}
+	return out, nil
+}
+
+// ExtractConfig returns the guest config embedded in a backup archive (the
+// restore target), parsed from the text vzdump/extractconfig returns.
+func (c *Client) ExtractConfig(node, volume string) (map[string]string, error) {
+	var text string
+	p := "/api2/json/nodes/" + url.PathEscape(node) +
+		"/vzdump/extractconfig?volume=" + url.QueryEscape(volume)
+	if err := c.get(p, &text); err != nil {
+		return nil, err
+	}
+	return parseConfText(text), nil
+}
+
+// parseConfText parses a PVE config in text form ("key: value" lines), used by
+// vzdump/extractconfig. It stops at the first "[snapshot]" section.
+func parseConfText(text string) map[string]string {
+	out := map[string]string{}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			break
+		}
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return out
 }
 
 // StorageContent returns a volid -> size(bytes) map for a node's storage,

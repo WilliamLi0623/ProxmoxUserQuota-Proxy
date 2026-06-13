@@ -58,9 +58,13 @@ func TestCheckQuotaNodeOverride(t *testing.T) {
 	}
 }
 
-// fakeAPI implements usage.APIClient with an empty pool (usage 0) and a fixed
-// set of guest configs.
-type fakeAPI struct{ configs map[int]map[string]string }
+// fakeAPI implements usage.APIClient with an empty pool (usage 0) and fixed
+// guest/snapshot/archive configs.
+type fakeAPI struct {
+	configs  map[int]map[string]string
+	snaps    map[string]map[string]string
+	archives map[string]map[string]string
+}
 
 func (f *fakeAPI) PoolMembers(string) ([]pve.Member, error) { return nil, nil }
 func (f *fakeAPI) GuestConfig(_, _ string, vmid int) (map[string]string, error) {
@@ -71,6 +75,18 @@ func (f *fakeAPI) GuestConfig(_, _ string, vmid int) (map[string]string, error) 
 }
 func (f *fakeAPI) StorageContent(string, string) (map[string]int64, error) {
 	return map[string]int64{}, nil
+}
+func (f *fakeAPI) SnapshotConfig(_, _ string, _ int, snap string) (map[string]string, error) {
+	if c, ok := f.snaps[snap]; ok {
+		return c, nil
+	}
+	return nil, fmt.Errorf("no snapshot %s", snap)
+}
+func (f *fakeAPI) ExtractConfig(_, vol string) (map[string]string, error) {
+	if c, ok := f.archives[vol]; ok {
+		return c, nil
+	}
+	return nil, fmt.Errorf("no archive %s", vol)
 }
 
 func newStore(t *testing.T) *quota.Store {
@@ -157,6 +173,54 @@ func TestMiddlewareAdminBypass(t *testing.T) {
 	h.ServeHTTP(w, createReq("json", "vmid=999&cores=64&memory=999999"))
 	if !called {
 		t.Error("admin user must bypass enforcement")
+	}
+}
+
+func TestMiddlewareDeniesOverQuotaClone(t *testing.T) {
+	// Source guest 100 has 8 cores; cloning it would exceed the 4-core quota.
+	eng := usage.NewEngine(&fakeAPI{configs: map[int]map[string]string{
+		100: {"cores": "8", "memory": "2048"},
+	}})
+	e := New(newStore(t), eng, nil, true, discard())
+	called := false
+	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	r, _ := http.NewRequest("POST", "/api2/json/nodes/n1/qemu/100/clone",
+		io.NopCloser(strings.NewReader("newid=200&pool=uq-u")))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Cookie", "PVEAuthCookie=PVE:u@pve:6A::sig")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if called {
+		t.Error("over-quota clone must be denied")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Errorf("json deny should be 403, got %d", w.Code)
+	}
+}
+
+func TestMiddlewareDeniesOverQuotaRollback(t *testing.T) {
+	// Rolling back to a snapshot configured with 8 cores exceeds the 4 quota.
+	eng := usage.NewEngine(&fakeAPI{
+		configs: map[int]map[string]string{100: {"cores": "2", "memory": "2048"}},
+		snaps:   map[string]map[string]string{"snap1": {"cores": "8", "memory": "2048"}},
+	})
+	e := New(newStore(t), eng, nil, true, discard())
+	called := false
+	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	r, _ := http.NewRequest("POST",
+		"/api2/json/nodes/n1/qemu/100/snapshot/snap1/rollback",
+		io.NopCloser(strings.NewReader("")))
+	r.Header.Set("Cookie", "PVEAuthCookie=PVE:u@pve:6A::sig")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if called {
+		t.Error("over-quota rollback must be denied")
 	}
 }
 

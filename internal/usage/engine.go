@@ -12,6 +12,8 @@ type APIClient interface {
 	PoolMembers(poolid string) ([]pve.Member, error)
 	GuestConfig(node, kind string, vmid int) (map[string]string, error)
 	StorageContent(node, storage string) (map[string]int64, error)
+	SnapshotConfig(node, kind string, vmid int, snap string) (map[string]string, error)
+	ExtractConfig(node, volume string) (map[string]string, error)
 }
 
 // Engine computes live usage by reading pool membership and guest configs.
@@ -25,6 +27,50 @@ func NewEngine(api APIClient) *Engine { return &Engine{api: api} }
 // math against pending config/resize changes.
 func (e *Engine) GuestConfig(node, kind string, vmid int) (map[string]string, error) {
 	return e.api.GuestConfig(node, kind, vmid)
+}
+
+// GuestUsage computes one existing guest's full footprint (cores, memory,
+// instances=1, disk incl. unused volumes resolved via storage content). Used
+// for clone deltas — a clone copies the source's footprint.
+func (e *Engine) GuestUsage(node, kind string, vmid int) (Usage, error) {
+	cfg, err := e.api.GuestConfig(node, kind, vmid)
+	if err != nil {
+		return Usage{}, err
+	}
+	return e.resourcesUsage(node, kind, cfg), nil
+}
+
+// SnapshotUsage computes the footprint of a snapshot's stored config (the
+// rollback target).
+func (e *Engine) SnapshotUsage(node, kind string, vmid int, snap string) (Usage, error) {
+	cfg, err := e.api.SnapshotConfig(node, kind, vmid, snap)
+	if err != nil {
+		return Usage{}, err
+	}
+	return ConfigUsage(kind, cfg), nil
+}
+
+// RestoreUsage computes the footprint of the config embedded in a backup
+// archive (the restore target).
+func (e *Engine) RestoreUsage(node, volume, kind string) (Usage, error) {
+	cfg, err := e.api.ExtractConfig(node, volume)
+	if err != nil {
+		return Usage{}, err
+	}
+	return ConfigUsage(kind, cfg), nil
+}
+
+func (e *Engine) resourcesUsage(node, kind string, cfg map[string]string) Usage {
+	r := GuestResources(kind, cfg)
+	u := Usage{Cores: r.Cores, MemoryMiB: r.MemoryMiB, Instances: 1, DiskBytes: map[string]int64{}}
+	for st, b := range r.Disks {
+		u.DiskBytes[st] += b
+	}
+	cache := map[string]map[string]int64{}
+	for _, ref := range r.Unused {
+		u.DiskBytes[ref.Storage] += e.volumeSize(cache, node, ref)
+	}
+	return u
 }
 
 // PoolMemberSet returns the set of qemu/lxc VMIDs in a pool. Admission uses it

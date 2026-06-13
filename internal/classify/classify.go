@@ -35,6 +35,7 @@ type Result struct {
 	Node          string
 	VMID          string
 	Storage       string
+	Snapshot      string // snapshot name, for rollback
 	QuotaRelevant bool
 	Phase         string // enforcement phase: "P4" | "P5" | ""
 }
@@ -113,6 +114,7 @@ func classifyGuest(method string, segs []string, res Result) Result {
 		case "snapshot":
 			// .../snapshot/{snap}/rollback is quota-relevant; create/delete pass.
 			if method == "POST" && len(segs) >= 7 && segs[6] == "rollback" {
+				res.Snapshot = segs[5]
 				return quota(res, ActionRollback, "P5")
 			}
 		}

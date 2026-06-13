@@ -4,7 +4,7 @@
 
 The transparent quota-enforcing reverse proxy for Proxmox VE (Go). Sits between users and `pveproxy:8006`: forwards everything verbatim (incl. noVNC/SPICE websockets and ISO uploads) except the ~15 resource-mutating write endpoints, which undergo per-user quota admission. Fail-closed.
 
-**Status: P4 core-write quota admission validated on a test cluster** (P1–P3 all validated on PVE 9.2.3). With `-enforce`, over-quota create/config/resize are rejected per the user's quota (PVE-compatible error envelope, readable in the GUI) and pool-membership edits are denied for users; a per-user serialization lock is held until the change is observable in live accounting (a create until its VMID joins the pool, a config/resize until the guest's config changes), defeating PVE's async-task propagation lag so even concurrent floods never overshoot. Without `-enforce` it stays in audit mode (accounting + logging only). See [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md).
+**Status: P5 side-door enforcement validated on a test cluster** (P1–P4 all validated on PVE 9.2.3). With `-enforce`, over-quota create/config/resize plus the side doors **clone / restore / move-disk / snapshot rollback** are rejected per the user's quota (PVE-compatible error envelope, readable in the GUI) and pool-membership edits are denied for users; a per-user serialization lock is held until the change is observable in live accounting, defeating PVE's async-task propagation lag so even concurrent floods never overshoot. Without `-enforce` it stays in audit mode (accounting + logging only). See [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md).
 
 ## Build & Run
 

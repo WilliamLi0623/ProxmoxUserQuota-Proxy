@@ -29,6 +29,19 @@ func (u Usage) DiskGiB() map[string]int64 {
 	return out
 }
 
+// ConfigUsage computes a one-guest footprint (cores, memory, instances=1, disk
+// per storage) from a config map using only inline `size=` values. Unused
+// disks without an inline size are skipped — used for backup/snapshot configs
+// whose volumes may not be queryable via the storage API.
+func ConfigUsage(kind string, cfg map[string]string) Usage {
+	r := GuestResources(kind, cfg)
+	u := Usage{Cores: r.Cores, MemoryMiB: r.MemoryMiB, Instances: 1, DiskBytes: map[string]int64{}}
+	for st, b := range r.Disks {
+		u.DiskBytes[st] += b
+	}
+	return u
+}
+
 // Resources is the contribution of a single guest. Unused holds disks whose
 // size is not in the config line and must be resolved via the storage API.
 type Resources struct {

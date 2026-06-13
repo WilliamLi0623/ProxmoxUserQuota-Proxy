@@ -6,7 +6,9 @@
 // accounting: a read-only service-account client computes live per-user usage
 // from pool configs, and a hot-reloaded quota store (quotas.yaml) holds the
 // limits. P4 enforces: with -enforce, over-quota create/config/resize are
-// rejected (and pool-membership edits denied) under a per-user lock.
+// rejected (and pool-membership edits denied) under a per-user lock. P5 closes
+// the side doors (clone, restore, move-disk, snapshot rollback, raw storage
+// allocation) with the same admission path.
 package main
 
 import (
@@ -33,7 +35,7 @@ import (
 	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/usage"
 )
 
-const version = "0.4.0-p4"
+const version = "0.5.0-p5"
 
 func main() {
 	var (

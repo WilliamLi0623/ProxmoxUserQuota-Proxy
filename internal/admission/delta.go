@@ -83,6 +83,85 @@ func ResizeDelta(p, cur map[string]string) Delta {
 	return d
 }
 
+// usageToDelta converts a one-guest footprint into a Delta.
+func usageToDelta(u usage.Usage) Delta {
+	d := newDelta()
+	d.Cores = u.Cores
+	d.MemoryMiB = u.MemoryMiB
+	d.Instances = u.Instances
+	for st, b := range u.DiskBytes {
+		d.DiskBytes[st] = b
+	}
+	return d
+}
+
+// CloneDelta is the footprint of a clone: the source's resources, +1 instance.
+// A full clone with a target `storage` lands all disk on that storage.
+func CloneDelta(src usage.Usage, params map[string]string) Delta {
+	d := usageToDelta(src)
+	d.Instances = 1
+	if st := params["storage"]; st != "" {
+		var total int64
+		for _, b := range d.DiskBytes {
+			total += b
+		}
+		d.DiskBytes = map[string]int64{st: total}
+	}
+	return d
+}
+
+// IncreaseDelta is the positive difference target-current per dimension, used
+// for snapshot rollback (the older config may be larger).
+func IncreaseDelta(target, current usage.Usage) Delta {
+	d := newDelta()
+	if target.Cores > current.Cores {
+		d.Cores = target.Cores - current.Cores
+	}
+	if target.MemoryMiB > current.MemoryMiB {
+		d.MemoryMiB = target.MemoryMiB - current.MemoryMiB
+	}
+	for st, tb := range target.DiskBytes {
+		if tb > current.DiskBytes[st] {
+			d.DiskBytes[st] = tb - current.DiskBytes[st]
+		}
+	}
+	return d
+}
+
+// MoveDelta is the disk a move_disk/move_volume lands on the target storage.
+// Moving within the same storage is a no-op for quota.
+func MoveDelta(kind string, params, cur map[string]string) Delta {
+	d := newDelta()
+	key := params["disk"]
+	if key == "" {
+		key = params["volume"] // lxc move_volume
+	}
+	target := params["storage"]
+	if key == "" || target == "" {
+		return d
+	}
+	st, size, hasSize, _, _ := usage.ParseDisk(cur[key])
+	if st == target {
+		return d
+	}
+	if hasSize {
+		d.DiskBytes[target] = size
+	}
+	return d
+}
+
+// StorageAllocDelta is the size a raw volume allocation adds on a storage.
+func StorageAllocDelta(storage string, params map[string]string) Delta {
+	d := newDelta()
+	if storage == "" {
+		return d
+	}
+	if n, ok := usage.ParseSize(params["size"]); ok && n > 0 {
+		d.DiskBytes[storage] = n
+	}
+	return d
+}
+
 // addDiskParams adds the sizes of create-style disk params to dst. When cur is
 // non-nil, only keys absent from cur count (genuinely new disks).
 func addDiskParams(dst map[string]int64, p, cur map[string]string) {

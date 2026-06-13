@@ -130,8 +130,9 @@ func (e *Enforcer) Middleware(next http.Handler) http.Handler {
 
 func enforceable(a classify.Action) bool {
 	switch a {
-	case classify.ActionGuestCreate, classify.ActionGuestConfig,
-		classify.ActionResize, classify.ActionPoolMembership:
+	case classify.ActionGuestCreate, classify.ActionGuestConfig, classify.ActionResize,
+		classify.ActionClone, classify.ActionMoveDisk, classify.ActionRollback,
+		classify.ActionStorageAlloc, classify.ActionPoolMembership:
 		return true
 	}
 	return false
@@ -144,40 +145,89 @@ func (e *Enforcer) decide(res classify.Result, q *quota.UserQuota, params map[st
 	switch res.Action {
 	case classify.ActionGuestCreate:
 		if audit.IsRestore(params) {
-			return decision{allowed: true} // restore footprint is in the backup; P5
+			archive := params["archive"]
+			if archive == "" {
+				archive = params["ostemplate"] // CT restore carries the backup here
+			}
+			u, err := e.engine.RestoreUsage(res.Node, archive, res.GuestKind)
+			if err != nil {
+				return e.failOpen("restore config unreadable", err)
+			}
+			d := usageToDelta(u)
+			return e.finalizeCreate(e.check(q, res.Node, d), d, atoi(params["vmid"]), q.Pool)
 		}
 		d := CreateDelta(res.GuestKind, params)
-		dec := e.check(q, res.Node, d)
-		if dec.allowed && d.positive() {
-			dec.settle = settleCreate
-			dec.vmid = atoi(params["vmid"])
-			dec.pool = q.Pool
+		return e.finalizeCreate(e.check(q, res.Node, d), d, atoi(params["vmid"]), q.Pool)
+
+	case classify.ActionClone:
+		src, err := e.engine.GuestUsage(res.Node, res.GuestKind, vmid)
+		if err != nil {
+			return e.failOpen("clone source unreadable", err)
 		}
-		return dec
-	case classify.ActionGuestConfig, classify.ActionResize:
+		d := CloneDelta(src, params)
+		return e.finalizeCreate(e.check(q, res.Node, d), d, atoi(params["newid"]), q.Pool)
+
+	case classify.ActionGuestConfig, classify.ActionResize, classify.ActionMoveDisk:
 		cur, err := e.engine.GuestConfig(res.Node, res.GuestKind, vmid)
 		if err != nil {
-			e.logger.Warn("admission allow: current config unreadable (P4 fail-open)",
-				"vmid", res.VMID, "err", err)
-			return decision{allowed: true}
+			return e.failOpen("current config unreadable", err)
 		}
 		var d Delta
-		if res.Action == classify.ActionResize {
+		switch res.Action {
+		case classify.ActionResize:
 			d = ResizeDelta(params, cur)
-		} else {
+		case classify.ActionMoveDisk:
+			d = MoveDelta(res.GuestKind, params, cur)
+		default:
 			d = ConfigDelta(res.GuestKind, params, cur)
 		}
-		dec := e.check(q, res.Node, d)
-		if dec.allowed && d.positive() {
-			dec.settle = settleGuestMod
-			dec.vmid = vmid
-			dec.node = res.Node
-			dec.kind = res.GuestKind
-			dec.preCfg = cur
+		return e.finalizeGuestMod(e.check(q, res.Node, d), d, res.Node, res.GuestKind, vmid, cur)
+
+	case classify.ActionRollback:
+		cur, err := e.engine.GuestConfig(res.Node, res.GuestKind, vmid)
+		if err != nil {
+			return e.failOpen("current config unreadable", err)
 		}
-		return dec
+		snapU, err := e.engine.SnapshotUsage(res.Node, res.GuestKind, vmid, res.Snapshot)
+		if err != nil {
+			return e.failOpen("snapshot config unreadable", err)
+		}
+		d := IncreaseDelta(snapU, usage.ConfigUsage(res.GuestKind, cur))
+		return e.finalizeGuestMod(e.check(q, res.Node, d), d, res.Node, res.GuestKind, vmid, cur)
+
+	case classify.ActionStorageAlloc:
+		// Raw volume allocation is not attached to a guest config, so it is not
+		// counted by config-based accounting and cannot be settled. Best-effort
+		// check against current usage; P6 reconciliation backstops drift.
+		d := StorageAllocDelta(res.Storage, params)
+		return e.check(q, res.Node, d)
 	}
 	return decision{allowed: true}
+}
+
+func (e *Enforcer) failOpen(msg string, err error) decision {
+	e.logger.Warn("admission allow: "+msg+" (fail-open)", "err", err)
+	return decision{allowed: true}
+}
+
+func (e *Enforcer) finalizeCreate(dec decision, d Delta, vmid int, pool string) decision {
+	if dec.allowed && d.positive() {
+		dec.settle = settleCreate
+		dec.vmid = vmid
+		dec.pool = pool
+	}
+	return dec
+}
+
+func (e *Enforcer) finalizeGuestMod(dec decision, d Delta, node, kind string, vmid int, cur map[string]string) decision {
+	if dec.allowed && d.positive() {
+		dec.settle = settleGuestMod
+		dec.vmid = vmid
+		dec.node = node
+		dec.kind = kind
+		dec.preCfg = cur
+	}
+	return dec
 }
 
 // check returns an allow/deny decision for a delta against the user's live

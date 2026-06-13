@@ -22,6 +22,12 @@ func (f *fakeAPI) StorageContent(node, storage string) (map[string]int64, error)
 	return f.content[node+"/"+storage], nil
 }
 
+func (f *fakeAPI) SnapshotConfig(_, _ string, _ int, _ string) (map[string]string, error) {
+	return nil, nil
+}
+
+func (f *fakeAPI) ExtractConfig(_, _ string) (map[string]string, error) { return nil, nil }
+
 func TestEngineUserUsage(t *testing.T) {
 	f := &fakeAPI{
 		members: []pve.Member{

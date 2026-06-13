@@ -1,6 +1,10 @@
 package admission
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/usage"
+)
 
 func TestCreateDeltaQEMU(t *testing.T) {
 	d := CreateDelta("qemu", map[string]string{
@@ -65,5 +69,55 @@ func TestResizeDeltaAbsolute(t *testing.T) {
 	d := ResizeDelta(map[string]string{"disk": "scsi0", "size": "25G"}, cur)
 	if d.DiskBytes["pool"] != 15<<30 {
 		t.Errorf("disk delta=%d want 15 GiB", d.DiskBytes["pool"])
+	}
+}
+
+func TestCloneDelta(t *testing.T) {
+	src := usage.Usage{Cores: 4, MemoryMiB: 8192, Instances: 1,
+		DiskBytes: map[string]int64{"pool": 32 << 30}}
+	d := CloneDelta(src, map[string]string{})
+	if d.Cores != 4 || d.MemoryMiB != 8192 || d.Instances != 1 ||
+		d.DiskBytes["pool"] != 32<<30 {
+		t.Fatalf("clone delta %+v", d)
+	}
+	d2 := CloneDelta(src, map[string]string{"storage": "fast"})
+	if d2.DiskBytes["fast"] != 32<<30 || d2.DiskBytes["pool"] != 0 {
+		t.Errorf("clone-to-storage should move all disk to fast: %+v", d2.DiskBytes)
+	}
+}
+
+func TestIncreaseDelta(t *testing.T) {
+	target := usage.Usage{Cores: 8, MemoryMiB: 16384,
+		DiskBytes: map[string]int64{"pool": 50 << 30}}
+	current := usage.Usage{Cores: 4, MemoryMiB: 16384,
+		DiskBytes: map[string]int64{"pool": 30 << 30}}
+	d := IncreaseDelta(target, current)
+	if d.Cores != 4 {
+		t.Errorf("cores delta=%d want 4", d.Cores)
+	}
+	if d.MemoryMiB != 0 {
+		t.Errorf("mem delta=%d want 0 (no increase)", d.MemoryMiB)
+	}
+	if d.DiskBytes["pool"] != 20<<30 {
+		t.Errorf("disk delta=%d want 20 GiB", d.DiskBytes["pool"])
+	}
+}
+
+func TestMoveDelta(t *testing.T) {
+	cur := map[string]string{"scsi0": "pool:vm-1-disk-0,size=10G"}
+	d := MoveDelta("qemu", map[string]string{"disk": "scsi0", "storage": "fast"}, cur)
+	if d.DiskBytes["fast"] != 10<<30 {
+		t.Errorf("move delta=%d want 10 GiB on fast", d.DiskBytes["fast"])
+	}
+	d2 := MoveDelta("qemu", map[string]string{"disk": "scsi0", "storage": "pool"}, cur)
+	if d2.positive() {
+		t.Errorf("same-storage move should be a no-op: %+v", d2)
+	}
+}
+
+func TestStorageAllocDelta(t *testing.T) {
+	d := StorageAllocDelta("pool", map[string]string{"size": "16G"})
+	if d.DiskBytes["pool"] != 16<<30 {
+		t.Errorf("alloc delta=%d want 16 GiB", d.DiskBytes["pool"])
 	}
 }

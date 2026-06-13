@@ -4,7 +4,7 @@
 
 Proxmox VE 的透明配额代理（Go）。位于用户与 `pveproxy:8006` 之间：除「资源变更」写请求外，一切逐字转发（含 noVNC/SPICE websocket 与 ISO 上传）；对约 15 个写端点做按用户配额审批，fail-closed。
 
-**状态：P4 核心写端点配额准入已在测试集群验证**（P1–P3 均已在 PVE 9.2.3 验证）。加 `-enforce` 后，超额的 create/config/resize 会被按用户配额拒绝（PVE 兼容错误信封，GUI 可读），池成员变更对用户拒绝；按用户串行化锁**持锁直到变更在实时核算中可见**（create 等 VMID 进池、config/resize 等配置实际变化）才释放——堵住 PVE 异步任务的传播延迟，确保并发洪水也不超额。不加 `-enforce` 则为审计模式（只核算+记录）。见 [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md)。
+**状态：P5 侧门拦截已在测试集群验证**（P1–P4 均已在 PVE 9.2.3 验证）。加 `-enforce` 后，超额的 create/config/resize 以及侧门 **clone / restore / move-disk / snapshot rollback** 都会被按用户配额拒绝（PVE 兼容错误信封，GUI 可读），池成员变更对用户拒绝；按用户串行化锁**持锁直到变更在实时核算中可见**，确保并发洪水也不超额。不加 `-enforce` 则为审计模式（只核算+记录）。见 [Docs / phases.md](https://github.com/WilliamLi0623/ProxmoxUserQuota-Docs/blob/main/phases.md)。
 
 ## 构建与运行
 
