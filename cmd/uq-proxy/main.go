@@ -1,15 +1,18 @@
-// Command uq-proxy is the ProxmoxUserQuota transparent proxy (phases P1–P2).
+// Command uq-proxy is the ProxmoxUserQuota transparent proxy (phases P1–P3).
 //
 // It sits between users and pveproxy:8006 and forwards everything verbatim,
-// including websocket consoles (noVNC/xterm.js/SPICE) and ISO uploads. In P2
-// it additionally runs in audit mode: every quota-relevant write is attributed
-// to a user and its resource parameters are logged, without ever blocking.
-// Quota enforcement arrives in later phases (P4..P6).
+// including websocket consoles (noVNC/xterm.js/SPICE) and ISO uploads. P2 adds
+// audit mode (every quota-relevant write is attributed and logged, never
+// blocked). P3 adds accounting: a read-only service-account client computes
+// live per-user usage from pool configs, and a hot-reloaded quota store
+// (quotas.yaml) holds the limits. Enforcement using these arrives in P4.
 package main
 
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,14 +21,18 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/audit"
 	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/proxy"
+	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/pve"
+	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/quota"
+	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/usage"
 )
 
-const version = "0.2.0-p2"
+const version = "0.3.0-p3"
 
 func main() {
 	var (
@@ -36,6 +43,8 @@ func main() {
 		upstreamCA  = flag.String("upstream-ca", "", "PEM file with CA(s) used to verify the upstream; empty = system roots")
 		insecureUp  = flag.Bool("upstream-insecure", false, "skip upstream TLS verification (test clusters only)")
 		adminListen = flag.String("admin-listen", "127.0.0.1:9090", "plain-HTTP admin/health listener; empty to disable")
+		quotasPath  = flag.String("quotas", "", "path to quotas.yaml; enables the accounting endpoints")
+		pveTokenF   = flag.String("pve-token-file", "", "file with the service-account API token 'uq-proxy@pve!id=secret' for accounting reads")
 	)
 	flag.Parse()
 
@@ -59,6 +68,38 @@ func main() {
 			logger.Error("reading -upstream-ca", "err", err)
 			os.Exit(2)
 		}
+	}
+
+	// P3 accounting (optional): quota store + read-only service-account client.
+	var (
+		quotaStore *quota.Store
+		engine     *usage.Engine
+	)
+	if *quotasPath != "" {
+		quotaStore, err = quota.Open(*quotasPath, logger)
+		if err != nil {
+			logger.Error("loading quotas", "path", *quotasPath, "err", err)
+			os.Exit(2)
+		}
+		logger.Info("quota store loaded", "path", *quotasPath, "users", len(quotaStore.Users()))
+	}
+	if *pveTokenF != "" {
+		tok, rerr := os.ReadFile(*pveTokenF)
+		if rerr != nil {
+			logger.Error("reading -pve-token-file", "err", rerr)
+			os.Exit(2)
+		}
+		pveTLS := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: *insecureUp}
+		if len(caPEM) > 0 {
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(caPEM) {
+				logger.Error("upstream CA: no certificates parsed")
+				os.Exit(2)
+			}
+			pveTLS.RootCAs = pool
+		}
+		engine = usage.NewEngine(pve.New(target, strings.TrimSpace(string(tok)), pveTLS))
+		logger.Info("accounting client ready", "upstream", target.String())
 	}
 
 	handler, err := proxy.New(proxy.Options{
@@ -97,6 +138,7 @@ func main() {
 			mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 				fmt.Fprintf(w, "ok uq-proxy %s\n", version)
 			})
+			mux.HandleFunc("/usage", usageHandler(quotaStore, engine))
 			logger.Info("admin listener", "addr", *adminListen)
 			if err := http.ListenAndServe(*adminListen, mux); err != nil {
 				logger.Error("admin listener failed", "err", err)
@@ -106,6 +148,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if quotaStore != nil {
+		go quotaStore.Watch(ctx, 5*time.Second)
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -119,4 +164,51 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("shut down cleanly")
+}
+
+// usageHandler reports computed usage vs configured quota per user (optionally
+// filtered by ?user=). P3 is accounting-only: this local admin endpoint is how
+// the exit gate is verified against a manual inventory. P4 reuses the engine
+// and store for admission decisions.
+func usageHandler(store *quota.Store, engine *usage.Engine) http.HandlerFunc {
+	type entry struct {
+		User    string           `json:"user"`
+		Pool    string           `json:"pool,omitempty"`
+		Usage   usage.Usage      `json:"usage"`
+		DiskGiB map[string]int64 `json:"disk_gib,omitempty"`
+		Quota   *quota.UserQuota `json:"quota,omitempty"`
+		Error   string           `json:"error,omitempty"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil || engine == nil {
+			http.Error(w, "accounting not configured (need -quotas and -pve-token-file)",
+				http.StatusServiceUnavailable)
+			return
+		}
+		users := store.Users()
+		if u := r.URL.Query().Get("user"); u != "" {
+			users = []string{u}
+		}
+		out := make([]entry, 0, len(users))
+		for _, user := range users {
+			e := entry{User: user}
+			q, ok := store.Get(user)
+			if !ok {
+				e.Error = "no quota record (default deny)"
+				out = append(out, e)
+				continue
+			}
+			e.Pool = q.Pool
+			e.Quota = q
+			if u, err := engine.UserUsage(q.Pool); err != nil {
+				e.Error = err.Error()
+			} else {
+				e.Usage = u
+				e.DiskGiB = u.DiskGiB()
+			}
+			out = append(out, e)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	}
 }

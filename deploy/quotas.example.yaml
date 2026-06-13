@@ -1,0 +1,24 @@
+# quotas.yaml — ProxmoxUserQuota quota store (schema v0)
+# Policy is default-deny: a user with no record here has zero quota.
+# Reloaded automatically when this file changes (see -quotas flag).
+version: 0
+defaults: {}            # intentionally empty: default deny
+
+users:
+  alice@pve:
+    pool: uq-alice      # must match the user's provisioned pool (uq-<username>)
+    cores: 16
+    memory-mib: 32768
+    instances: 8
+    disk-gib:
+      local-lvm: 200    # per-storage caps; a storage not listed = not allowed
+    nodes:              # optional per-node overrides
+      pve1:
+        cores: 8
+  bob@pve:
+    pool: uq-bob
+    cores: 4
+    memory-mib: 8192
+    instances: 2
+    disk-gib:
+      local-lvm: 50
