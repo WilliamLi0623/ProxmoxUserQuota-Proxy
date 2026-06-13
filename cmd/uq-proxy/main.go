@@ -1,8 +1,10 @@
-// Command uq-proxy is the ProxmoxUserQuota transparent proxy (phase P1).
+// Command uq-proxy is the ProxmoxUserQuota transparent proxy (phases P1–P2).
 //
 // It sits between users and pveproxy:8006 and forwards everything verbatim,
-// including websocket consoles (noVNC/xterm.js/SPICE) and ISO uploads.
-// Quota classification and enforcement arrive in later phases (P2..P6).
+// including websocket consoles (noVNC/xterm.js/SPICE) and ISO uploads. In P2
+// it additionally runs in audit mode: every quota-relevant write is attributed
+// to a user and its resource parameters are logged, without ever blocking.
+// Quota enforcement arrives in later phases (P4..P6).
 package main
 
 import (
@@ -19,10 +21,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/audit"
 	"github.com/WilliamLi0623/ProxmoxUserQuota-Proxy/internal/proxy"
 )
 
-const version = "0.1.0-p1"
+const version = "0.2.0-p2"
 
 func main() {
 	var (
@@ -70,8 +73,10 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:    *listenAddr,
-		Handler: proxy.WithAccessLog(handler, logger),
+		Addr: *listenAddr,
+		// Order: access log (outermost, times everything) -> audit (attributes
+		// quota-relevant writes) -> reverse proxy. Audit is observe-only.
+		Handler: proxy.WithAccessLog(audit.Middleware(handler, logger), logger),
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			// Force HTTP/1.1 towards clients: pveproxy is HTTP/1.1-only anyway,
